@@ -63,6 +63,7 @@ python_files = [
 	"test_wallets.py",
 	"test_heartbeat.py",
 	"test_deployment.py",
+	"test_cost_accounting.py",
 	"test_storage.py",
 	"test_genesis_ceremony.py",
 	"test_internal.py",

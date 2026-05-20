@@ -22,9 +22,9 @@ from docker.client import DockerClient
 
 from .common import TestingContext
 from .conftest import (
-    assert_containers_running,
-    VALIDATOR1_KEY,
     ALL_CONTAINERS,
+    VALIDATOR1_KEY,
+    assert_containers_running,
 )
 from .rnode import Node
 
@@ -166,10 +166,10 @@ def test_network_converges_after_slow_deploy(
 ) -> None:
     """Deploy a phlo-exhausting loop and verify the shard converges.
 
-    The loop contract blocks V1 for ~25s while phlo is exhausted.
-    During this time, V2 and V3 create independent heartbeat blocks,
-    causing DAG tip divergence. After the deploy completes (errored),
-    the network must converge and LFB must advance.
+    The loop contract blocks V1 while phlo is exhausted. During this time,
+    V2 and V3 create independent heartbeat blocks, causing DAG tip divergence.
+    After the deploy completes (errored), the network must converge and LFB
+    must advance.
 
     This reproduces both:
     - #224: phlo-exhausting deploy stalls the proposing validator
@@ -194,8 +194,8 @@ def test_network_converges_after_slow_deploy(
     logging.info("Deployed loop contract, deploy_id=%s", deploy_id[:24])
 
     # Wait for the deploy to be included in a block. The phlo-exhausting
-    # loop takes ~200s to execute on the proposing validator, during which
-    # V2+V3 produce independent heartbeat blocks.
+    # loop keeps the proposing validator busy long enough for V2+V3 to
+    # produce independent heartbeat blocks.
     find_timeout = 300
     _, deploy_block = _wait_for_deploy_in_block(
         validator1_node, deploy_id, find_timeout,

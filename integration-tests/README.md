@@ -135,6 +135,7 @@ custom shard tests begin.
 | `test_wallets` | shard | Token wallet transfers, balance checks, error handling |
 | `test_heartbeat` | shard + standalone | Heartbeat auto-proposer (block creation, max-parents guard) |
 | `test_deployment` | shard | Deploy error handling (insufficient phlo) |
+| `test_cost_accounting` | shard | Rust-only cost-accounting regressions for permit-frontier OOP, deterministic parallel cost, and play/replay cost consistency |
 | `test_storage` | shard | Data storage and cross-validator retrieval via registry |
 | `test_genesis_ceremony` | shard | Genesis ceremony completion validation |
 | `test_internal` | shard | Pure Python unit tests for test utilities |

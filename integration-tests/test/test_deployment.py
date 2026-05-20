@@ -19,9 +19,9 @@ from f1r3fly.client import F1r3flyClientException
 
 from .common import TestingContext
 from .conftest import (
-    assert_containers_running,
-    VALIDATOR1_KEY,
     ALL_CONTAINERS,
+    VALIDATOR1_KEY,
+    assert_containers_running,
 )
 from .rnode import Node
 
@@ -35,15 +35,15 @@ def test_deploy_with_not_enough_phlo(
 ) -> None:
     """Deploy with insufficient phlo should be included in a block but marked as errored.
 
-    Deploys a simple contract with phlo_limit=10 (too low -- even '@1!(1)' costs ~97 phlo).
-    Heartbeat auto-proposes the block. The deploy should be in the block with
-    errored=True.
+    Deploys a simple contract with phlo_limit=10, which is below the cost of
+    the metered source transition. Heartbeat auto-proposes the block. The
+    deploy should be in the block with errored=True.
     """
     assert_containers_running(docker_client, ALL_CONTAINERS)
 
     node = validator1_node
 
-    # Deploy with intentionally low phlo limit (97 phlo needed, only 10 allowed)
+    # Deploy with intentionally low phlo limit.
     deploy_id = node.deploy_string(
         '@1!(1)',
         VALIDATOR1_KEY,
@@ -88,4 +88,7 @@ def test_deploy_with_not_enough_phlo(
     )
     assert errored_deploy.errored, (
         f"Deploy with phlo_limit=10 should be errored, got errored={errored_deploy.errored}"
+    )
+    assert errored_deploy.cost == 10, (
+        f"Out-of-phlo deploy should commit exact phlo limit, got cost={errored_deploy.cost}"
     )

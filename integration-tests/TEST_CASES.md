@@ -39,7 +39,17 @@
 
 | Test | What it does |
 |------|-------------|
-| `test_deploy_with_not_enough_phlo` | Deploys with `phlo_limit=10` (needs ~97). Verifies the deploy is included in a block but marked as `errored=true` |
+| `test_deploy_with_not_enough_phlo` | Deploys with `phlo_limit=10`, verifies the deploy is included in a block, marked as `errored=true`, and charged exactly to the phlo-limit boundary |
+
+## test_cost_accounting.py (shard, Rust-only, 3 tests)
+
+These tests cover cost-accounting regressions at the Docker/API boundary. The historical `concurrent-rspace-architecture.md` proposal was rejected before the current cost-accounting work, but its TOCTOU, COMM trigger-order, and play/replay cost-mismatch bugs are retained here as regression scenarios under the current permit-frontier design.
+
+| Test | What it does |
+|------|-------------|
+| `test_low_phlo_parallel_fanout_charges_to_limit_and_finalizes` | Deploys a parallel fanout contract with too little phlo, verifies it is included, marked errored, charged exactly to `phlo_limit`, and the shard continues finalizing |
+| `test_parallel_permutation_explore_cost_is_stable` | Calls `/api/explore-deploy` for equivalent parallel send/receive permutations and verifies positive, equal costs |
+| `test_interacting_comm_bodies_finalize_without_replay_cost_mismatch` | Deploys the historical body-interleaving cost-mismatch repro and verifies the block finalizes across validators without replay rejection |
 
 ## test_storage.py (shard, 2 tests)
 
@@ -92,7 +102,7 @@
 | Test | What it does |
 |------|-------------|
 | `test_network_recovers_from_validator_pause` | Pauses validator1 container for 15s to force DAG tip divergence while V2+V3 produce heartbeat blocks. After unpause, verifies LFB advances 3+ blocks on all nodes (multi-parent convergence blocks merge the diverged forks) |
-| `test_network_converges_after_slow_deploy` | Deploys a phlo-exhausting loop (`loop!(100000)` with 20M phlo). The loop blocks V1 for ~200s while V2+V3 produce heartbeat blocks. After the deploy finishes (errored -- phlo exhausted), verifies: (1) the deploy is included in a block, (2) LFB advances 3+ blocks past that block, (3) all 3 validators converge to the same LFB within 2 blocks. **Not in CI** — stalls the shard for subsequent tests |
+| `test_network_converges_after_slow_deploy` | Deploys a phlo-exhausting loop (`loop!(100000)` with 20M phlo). The loop keeps V1 busy while V2+V3 produce heartbeat blocks. After the deploy finishes (errored -- phlo exhausted), verifies: (1) the deploy is included in a block, (2) LFB advances 3+ blocks past that block, (3) all 3 validators converge to the same LFB within 2 blocks. **Not in CI** — stalls the shard for subsequent tests |
 
 ## test_load.py (shard, 1 test)
 
