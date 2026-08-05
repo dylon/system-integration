@@ -60,7 +60,9 @@ openai {
 - GPT-4o-mini is used (not GPT-4), DALL-E 3 at 1024x1024, TTS-1 with shimmer voice.
 - After shard restart, embers needs restart too (fresh blockchain state requires re-bootstrapping init contracts).
 - All f1r3sky services (postgres, redis, f1r3sky, f1r3sky-frontend) also need restart after shard restart.
-- See `docs/local-dev-setup.md` in the embers repo for full startup sequence.
+- See `docs/local-dev-setup.md` in this repository for the full startup sequence.
+- Variable names differ by node implementation: the Rust node reads `OPENAI_API_KEY`,
+  the Scala node reads `OPENAI_SCALA_CLIENT_API_KEY`. `.env.node` carries both.
 
 ## Resolved: WebSocket Block Events
 

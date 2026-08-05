@@ -52,12 +52,37 @@ services:
     networks:
       - node-net
 
+  # Embers runs with F1r3drive co-located in the same container (the image's
+  # entrypoint supervises both): embers refuses to start unless its Agent
+  # Teams continuation store sits on a FUSE mount whose fsname contains
+  # "f1r3drive", and keeping the mount in one container makes the stack behave
+  # identically on Linux, macOS, and Windows. FUSE requires /dev/fuse,
+  # SYS_ADMIN, and (on AppArmor hosts such as Ubuntu) apparmor:unconfined.
   embers:
     image: f1r3flyio/embers:local
     env_file:
-      - ../services/embers/${EMBERS_ENV:-embers.rust-standalone.env}
+      - ../env/${EMBERS_ENV:-embers.rust-standalone.env}
     ports:
       - "8080:3000"
+    devices:
+      - /dev/fuse
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
+    volumes:
+      # Persists the F1r3drive AES cipher key (generated on first run);
+      # losing it makes previously written drive content undecryptable.
+      - embers-f1r3drive:/data/f1r3drive
+    healthcheck:
+      # 127.0.0.1 rather than localhost: extra_hosts remaps localhost to the
+      # f1r3sky container for did:web handle resolution.
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:3000/api/service/ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 120s
+    restart: on-failure
     depends_on:
       f1r3sky:
         condition: service_started
@@ -86,6 +111,7 @@ services:
 
 volumes:
   f1r3sky-pgdata:
+  embers-f1r3drive:
 
 networks:
   node-net:

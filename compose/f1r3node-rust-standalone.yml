@@ -24,6 +24,11 @@ services:
       [
         "run",
         "-s",
+        # Command-line-only on purpose (conf/standalone-dev.conf sets
+        # autopropose = false and documents that it is passed here). The
+        # embers bootstrap and the co-located F1r3drive both deploy and rely
+        # on the validator proposing without manual intervention.
+        "--autopropose",
         "--host=${STANDALONE_HOST:-rnode.standalone}",
         "--validator-private-key=${STANDALONE_PRIVATE_KEY:-5f668a7ee96d944a4494cc947e4005e172d7ab3461ee5538f1f2a45a835e9657}",
       ]
@@ -48,7 +53,13 @@ services:
       - ../genesis/standalone-wallets.txt:/var/lib/rnode/genesis/wallets.txt
       - ../genesis/standalone-bonds.txt:/var/lib/rnode/genesis/bonds.txt
     environment:
+      # Compose gives the OS environment precedence over --env-file: shell-
+      # exported OPENAI_* values silently override .env.node here.
       - OPENAI_ENABLED=${OPENAI_ENABLED:-false}
+      # The Rust node resolves the key from OPENAI_API_KEY (or openai.api-key
+      # in the conf); OPENAI_SCALA_CLIENT_API_KEY is the Scala node's variable,
+      # kept for compose parity with the Scala files.
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - OPENAI_SCALA_CLIENT_API_KEY=${OPENAI_SCALA_CLIENT_API_KEY:-}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:40403/api/status"]

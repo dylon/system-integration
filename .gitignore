@@ -64,3 +64,7 @@ integration-tests/report.json
 integration-tests/.mypy_cache/
 integration-tests/.pytest_cache/
 integration-tests/data/
+
+# Tracked compose environment files at the repo root (the env/ rule above
+# targets Python virtual environments, which live in subdirectories).
+!/env/

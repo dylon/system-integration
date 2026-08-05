@@ -1,202 +1,284 @@
-# Local Development Setup
+# Local development stack (docker-first)
 
-Complete steps to run the full F1R3FLY stack locally for the embers demo: Rust standalone node, embers backend/frontend, F1R3Sky backend/frontend.
+This guide brings up the full F1R3FLY stack for the Embers agent-teams demo with **docker
+images as the delivery mechanism**: one standalone Rust node (cost-accounting branch), the
+Embers backend with **F1r3drive co-located inside its container**, the Embers web frontend,
+the F1R3Sky AT-proto backend, and (optionally) the F1R3Sky web frontend. Everything runs in
+containers; the host needs Docker and nothing else — no Rust, Java, Node, FUSE, or Nix.
 
-This setup uses a **single Rust standalone node** (not the 5-node shard). Standalone is simpler, faster, more memory-efficient, and the E2E demo passes 10/10 stable on it.
-
-## Quick Start
-
-```bash
-# 1. Build all 4 service images (one-time, see Build section)
-# 2. Configure OpenAI key in .env.node (see Configuration section)
-
-# 3. Start the Rust standalone node (pinned to v0.4.5)
-F1R3FLY_RUST_IMAGE=f1r3flyindustries/f1r3fly-rust-node:v0.4.5 \
-STANDALONE_HOST=rnode.rust-standalone \
-docker compose -p rust-standalone -f compose/f1r3node-rust-standalone.yml \
-  --env-file .env.node up -d
-
-# 4. Start all other services (embers + f1r3sky)
-./scripts/start-all.sh --node rust-standalone
-
-# 5. Verify status
-./scripts/status.sh
-
-# 6. Stop services (preserves volumes)
-./scripts/stop-all.sh --node rust-standalone
-
-# 7. Stop services and wipe data
-./scripts/stop-all.sh --node rust-standalone --clean
-
-# 8. Stop the Rust node
-docker compose -p rust-standalone -f compose/f1r3node-rust-standalone.yml down -v
+```text
+browser ──▶ embers-frontend :8081 ──▶ embers :8080 ─┬─▶ rnode.rust-standalone :40401/:40403
+                                                    ├─▶ f1r3sky (PDS :2583)
+                                       f1r3drive ───┘   (inside the embers container,
+                                                         FUSE mount /mnt/f1r3drive)
 ```
+
+The complete topology, with every container, port, volume, and the in-container FUSE flow,
+is drawn in [diagrams/local-dev-stack.svg](diagrams/local-dev-stack.svg)
+(source: [diagrams/local-dev-stack.puml](diagrams/local-dev-stack.puml)).
 
 ## Prerequisites
 
-- Docker Desktop running (allocate at least **2 GB RAM** — standalone is much lighter than the shard)
-- GitHub PAT with `read:packages` scope (needed to build embers-frontend and f1r3sky frontend; both pull `@f1r3fly-io/*` packages from GitHub Packages)
-- OpenAI API key (for AI features in agent runs)
+- **Docker** with Compose v2.24 or newer (the port-override examples use the `!override`
+  tag). Docker Desktop on macOS/Windows and Docker Engine on Linux both work — see the
+  platform note below. Allow at least 8 GB RAM for the full set.
+- **GitHub personal access token** with `read:packages`, available in an `.npmrc` that maps
+  the `@f1r3fly-io` scope to GitHub Packages with a literal token (the embers-frontend and
+  f1r3sky frontend builds consume it as a BuildKit secret):
 
-## Rust Node Version
+  ```ini
+  @f1r3fly-io:registry=https://npm.pkg.github.com
+  //npm.pkg.github.com/:_authToken=<your token>
+  ```
 
-**Pin to `v0.4.5`.** The `:dev` and `:latest` tags as of 2026-04-22 (v0.4.13) changed the explore-deploy response format and break embers' deserializer with `failed to deserialize intermediate model`. Embers' compatibility code on the `feat/rust-node-compatibility` branch was last verified against v0.4.5 (released 2026-03-29).
+  Pass the file that holds the **literal** token. The embers-frontend repo's checked-in
+  `.npmrc` uses an `${NPM_TOKEN}` placeholder, which BuildKit does not expand — point the
+  secret at `~/.npmrc` (or export `NPM_TOKEN` and render the file first).
+- **OpenAI API key** — optional. The stack boots and passes verification without it;
+  it is required only to run agent teams whose activities call the `rho:ai:*` processes
+  (GPT text, DALL-E, TTS). The **Rust node reads `OPENAI_API_KEY`**
+  (`OPENAI_SCALA_CLIENT_API_KEY` is the Scala node's variable); set it in `.env.node`
+  together with `OPENAI_ENABLED=true`. See
+  [enable-openai-on-node.md](enable-openai-on-node.md). Beware precedence: compose lets
+  shell-exported `OPENAI_*` variables silently override `.env.node`.
 
-```bash
-docker pull f1r3flyindustries/f1r3fly-rust-node:v0.4.5
-```
+### Platform note: Linux, macOS, and Windows
 
-If you need to use a newer node, embers' `firefly-client/src/read_node_client.rs` deserialization needs updates to handle the new `ExprBundle`/`ExprUnforg` shape.
+Docker containers always run on a Linux kernel — natively on Linux, inside Docker Desktop's
+VM on macOS, and inside the WSL2 kernel on Windows — and all three ship the `fuse` module.
+The F1r3drive FUSE filesystem that Embers requires is mounted **inside** the embers
+container and never crosses a container or host boundary, so the stack behaves identically
+on all three platforms. No macFUSE, WinFsp, or host Java is needed. The embers service
+carries the privileges FUSE-in-a-container needs, already declared in the compose file:
 
-## Build
+- `devices: [/dev/fuse]`
+- `cap_add: [SYS_ADMIN]`
+- `security_opt: ["apparmor:unconfined"]` (required on AppArmor hosts such as Ubuntu;
+  harmless elsewhere)
 
-Build all 4 service images. Required branch checkouts:
+## Repositories and branches
 
-| Repo | Required branch |
-|---|---|
-| `services/embers` | `feat/rust-node-compatibility` |
-| `services/embers-frontend` | `docs/known-issues` |
-| `services/f1r3sky` | `docs/known-issues-and-dockerfile` |
-| `services/f1r3sky-backend` | `main` |
+Clone everything as **siblings under one workspace directory**. The node image build
+additionally needs the cost-accounting transpiler checkout next to the node repo.
 
-### 1. Embers backend (no PAT needed)
-
-```bash
-cd services/embers
-docker build -f docker/embers.dockerfile -t f1r3flyio/embers:local .
-```
-
-### 2. Embers frontend (requires GitHub PAT)
-
-The Dockerfile uses BuildKit secrets for private packages. Create a temporary `.npmrc` and pass via `--secret`:
-
-```bash
-printf "//npm.pkg.github.com/:_authToken=%s\n@f1r3fly-io:registry=https://npm.pkg.github.com/\n" \
-  "<github-pat>" > /tmp/.npmrc-ef
-
-cd services/embers-frontend
-DOCKER_BUILDKIT=1 docker build \
-  -f apps/embers/Dockerfile \
-  -t f1r3flyio/embers-frontend:local \
-  --secret id=npmrc,src=/tmp/.npmrc-ef \
-  .
-
-rm /tmp/.npmrc-ef
-```
-
-**Note:** The `docs/known-issues` branch currently has TypeScript errors in the embers app code (`Header.tsx`, `queries.ts`) that don't match the latest SDK API. If the build fails with `error TS2339: Property 'waitForFinalization' does not exist`, fall back to patching the pre-built image:
-
-```bash
-# Fallback: patch :latest from Docker Hub (15s → 120s finalization timeout)
-docker pull f1r3flyio/embers-frontend:latest
-docker create --name ef-patch f1r3flyio/embers-frontend:latest
-docker cp ef-patch:/usr/share/nginx/html/assets/ /tmp/ef-assets/
-
-# Find the file (filename may change between releases)
-JS_FILE=$(grep -l aitForFinalisation /tmp/ef-assets/*.js | head -1)
-
-python3 -c "
-with open('$JS_FILE', 'r') as f: c = f.read()
-c = c.replace('aitForFinalisation??15e3', 'aitForFinalisation??12e4')
-with open('$JS_FILE', 'w') as f: f.write(c)
-"
-
-docker cp "$JS_FILE" ef-patch:/usr/share/nginx/html/assets/
-docker commit ef-patch f1r3flyio/embers-frontend:local
-docker rm ef-patch && rm -rf /tmp/ef-assets
-```
-
-### 3. F1R3Sky backend (no PAT needed)
-
-```bash
-cd services/f1r3sky-backend
-docker build -f Dockerfile.dev -t f1r3flyindustries/firesky-ts:local .
-```
-
-The frontend uses `getPostThreadV2` which only exists in the locally-built backend, so `:local` and the matching f1r3sky frontend must be used together.
-
-### 4. F1R3Sky frontend (requires GitHub PAT)
-
-`EXPO_PUBLIC_EMBERS_API_URL` is an Expo build-time variable baked into the JS bundle — it cannot be set at runtime. Without it, auto-reply on @mentions (`runOnFiresky`) is broken because the embers SDK has no API URL.
-
-```bash
-cd services/f1r3sky
-docker build \
-  --build-arg NPM_TOKEN=<github-pat> \
-  --build-arg EXPO_PUBLIC_EMBERS_API_URL=http://localhost:8080 \
-  -t f1r3flyio/firesky-frontend:local .
-```
-
-This is the longest build (~10-15 min for the React Native/Expo bundle).
-
-### Image tags reference
-
-| Image | Tag | Source |
+| Repository | Branch | Needed for |
 |---|---|---|
-| `f1r3flyindustries/f1r3fly-rust-node` | `v0.4.5` | Docker Hub (do not use `:dev`/`:latest`) |
-| `f1r3flyio/embers` | `:local` | Built from `services/embers` |
-| `f1r3flyio/embers-frontend` | `:local` | Built from `services/embers-frontend` (or patched from `:latest`) |
-| `f1r3flyindustries/firesky-ts` | `:local` | Built from `services/f1r3sky-backend` |
-| `f1r3flyio/firesky-frontend` | `:local` | Built from `services/f1r3sky` |
-| `postgres:16-alpine` | — | Docker Hub |
-| `redis:7-alpine` | — | Docker Hub |
+| `system-integration` | `feat/local-dev-scripts` | compose files, env, genesis, scripts (this repo) |
+| `embers` | `dylon/embers-demo-fixes` | backend image (includes the F1r3drive build stages) |
+| `embers-frontend` | `dylon/embers-demo-fixes` | frontend image |
+| `f1r3node-rust` | `feature/cost-accounted-rho` | node image |
+| `rholang-rs-cost-accounting-transpiler` | `main` | node image (path dependency of the branch above) |
+| `f1r3drive` | `main` | embers image (local build-context override; the default is a git clone) |
+| `f1r3sky-backend` | `main` | firesky-ts image |
+| `f1r3sky` | `docs/known-issues-and-dockerfile` | optional F1R3Sky web frontend image |
+
+```bash
+WORKSPACE=~/f1r3fly && mkdir -p "$WORKSPACE" && cd "$WORKSPACE"
+git clone -b feat/local-dev-scripts git@github.com:F1R3FLY-io/system-integration.git
+git clone -b dylon/embers-demo-fixes git@github.com:F1R3FLY-io/embers.git
+git clone -b dylon/embers-demo-fixes git@github.com:F1R3FLY-io/embers-frontend.git
+git clone -b feature/cost-accounted-rho git@github.com:F1R3FLY-io/f1r3node-rust.git
+git clone git@github.com:F1R3FLY-io/rholang-rs-cost-accounting-transpiler.git
+git clone git@github.com:F1R3FLY-io/f1r3drive.git
+git clone git@github.com:F1R3FLY-io/f1r3sky-backend.git
+git clone -b docs/known-issues-and-dockerfile git@github.com:F1R3FLY-io/f1r3sky.git   # optional
+```
+
+The published registry images cannot serve this stack today: `f1r3flyindustries/f1r3fly-rust`
+is built from `master`, which does not carry the cost-accounting transpiler the agent-teams
+demo requires (the older `f1r3flyindustries/f1r3fly-rust-node` lineage is frozen), and the
+published `f1r3flyio/embers:latest` predates the F1r3drive continuation store, without which
+the current backend does not start. Until those branches merge and releases are cut, build
+locally as below — the commands are copy-paste complete.
+
+## Build the images
+
+All commands run from the workspace root. Build the node first; it is the longest build.
+
+**1. Node** — the branch's root `Cargo.toml` patches the Rholang crates to the sibling
+transpiler checkout, which sits outside the docker build context, so the build injects it
+as a named build context. Derive the one-line-extended Dockerfile and build:
+
+```bash
+cd f1r3node-rust
+awk '{print} /^COPY --from=xx \/ \/$/ && !done {print "COPY --from=transpiler / /rholang-rs-cost-accounting-transpiler/"; done=1} /^COPY node\/ .\/node\/$/ {print "COPY formal/loom/cost_accounting/ ./formal/loom/cost_accounting/"}' \
+    node/Dockerfile > /tmp/node-costacct.Dockerfile
+docker buildx build --load -f /tmp/node-costacct.Dockerfile \
+    --build-context transpiler=../rholang-rs-cost-accounting-transpiler \
+    -t f1r3flyindustries/f1r3fly-rust-node:cost-accounted-local .
+cd ..
+```
+
+**2. Embers backend (with F1r3drive inside)** — the dockerfile builds the F1r3drive fat JAR
+in a Gradle stage; pass the local checkout to build offline against your exact tree
+(omit `--build-context` to let the dockerfile clone from GitHub instead):
+
+```bash
+cd embers
+docker buildx build --load -f docker/embers.dockerfile \
+    --build-context f1r3drive-src=../f1r3drive \
+    -t f1r3flyio/embers:local .
+cd ..
+```
+
+**3. Embers frontend:**
+
+```bash
+cd embers-frontend
+docker buildx build --load -f apps/embers/Dockerfile \
+    --secret id=npmrc,src=$HOME/.npmrc \
+    -t f1r3flyio/embers-frontend:local .
+cd ..
+```
+
+**4. F1R3Sky backend:**
+
+```bash
+cd f1r3sky-backend
+docker buildx build --load -f Dockerfile.dev -t f1r3flyindustries/firesky-ts:local .
+cd ..
+```
+
+**5. F1R3Sky web frontend (optional, ~10-15 min):**
+
+```bash
+cd f1r3sky
+docker buildx build --load -f Dockerfile \
+    --build-arg NPM_TOKEN=<your token> \
+    --build-arg EXPO_PUBLIC_EMBERS_API_URL=http://localhost:8080 \
+    -t f1r3flyio/firesky-frontend:local .
+cd ..
+```
+
+| Image | Source | Role |
+|---|---|---|
+| `f1r3flyindustries/f1r3fly-rust-node:cost-accounted-local` | f1r3node-rust + transpiler | standalone node |
+| `f1r3flyio/embers:local` | embers + f1r3drive | backend + co-located FUSE store |
+| `f1r3flyio/embers-frontend:local` | embers-frontend | web UI (nginx) |
+| `f1r3flyindustries/firesky-ts:local` | f1r3sky-backend | AT-proto PDS/AppView/Ozone/PLC |
+| `f1r3flyio/firesky-frontend:local` | f1r3sky (optional) | F1R3Sky web UI |
+| `postgres:16-alpine`, `redis:7-alpine` | Docker Hub | stock infrastructure (pulled) |
 
 ## Configuration
 
-### OpenAI key (required for AI features)
+- **`.env.node`** (repo root) — node keypairs and the OpenAI toggles
+  (`OPENAI_ENABLED`, `OPENAI_SCALA_CLIENT_API_KEY`). The standalone container name
+  defaults to `rnode.standalone`; every command below overrides it to
+  `rnode.rust-standalone`, which is the DNS name the env file and scripts expect.
+- **`env/embers.rust-standalone.env`** — the tracked Embers + F1r3drive environment for
+  this stack (the compose file reads `../env/${EMBERS_ENV:-embers.rust-standalone.env}`).
+  It mirrors the natively verified embers-local-stack configuration: the `EMBERS__*`
+  variables configure the backend (both the mainnet and testnet modules point at the one
+  standalone node: deploys over gRPC `:40401`, observer reads and WebSocket events over
+  HTTP `:40403`), and the `F1R3DRIVE_*` variables configure the co-located drive process
+  (both of its gRPC channels also target `:40401`). Every key in the file is a published,
+  test-only local-development key — never reuse them beyond a private chain.
+- **`genesis/standalone-wallets.txt`** — funds five wallets: the demo sign-in wallet, the
+  three mainnet wallets (including the Embers service wallet, which is also the F1r3drive
+  wallet), and the testnet service wallet. The single standalone validator serves **both**
+  Embers networks, so both service wallets must be funded at genesis — an unfunded service
+  wallet makes the backend's bootstrap init deploys fail. Changing genesis invalidates any
+  existing node volume: tear down with `--clean` / `down -v` first.
 
-Edit `.env.node`:
+## Start the stack
 
 ```bash
-OPENAI_ENABLED=true
-OPENAI_SCALA_CLIENT_API_KEY="sk-proj-..."
+# 1. The node (compose project rust-standalone; network rust-standalone_f1r3fly-standalone)
+STANDALONE_HOST=rnode.rust-standalone \
+F1R3FLY_RUST_IMAGE=f1r3flyindustries/f1r3fly-rust-node:cost-accounted-local \
+docker compose -p rust-standalone -f compose/f1r3node-rust-standalone.yml \
+    --env-file .env.node up -d
+
+# 2. Everything else (waits for the node, resolves F1R3SKY_IP, creates user1.test)
+./scripts/start-all.sh --node rust-standalone
 ```
 
-The Rust node loads these at startup via `--env-file .env.node`. Without them, agent runs complete but produce empty results (no GPT-4 / DALL-E calls).
+Stop, and optionally wipe volumes (required after a genesis change):
 
-### Embers env file
-
-`services/embers/embers.rust-standalone.env` points embers at `http://rnode.rust-standalone:40401` (gRPC) and `http://rnode.rust-standalone:40403` (HTTP). Used automatically by `start-all.sh --node rust-standalone`.
-
-## Architecture
-
-```
-Rust Standalone Node (rust-standalone_f1r3fly-standalone network)
-└── rnode.rust-standalone   :40400 protocol, :40401 gRPC, :40402 internal-gRPC,
-                            :40403 HTTP, :40404 discovery, :40405 admin
-
-Embers Backend (port 8080) — compose-embers-1
-├── gRPC → rnode.rust-standalone:40401 (deploys)
-├── HTTP → rnode.rust-standalone:40403 (reads + WebSocket events)
-└── API → http://localhost:8080
-
-Embers Frontend (port 8081) — compose-embers-frontend-1
-└── API_URL → http://localhost:8080
-
-F1R3Sky Backend (single container, dev-env) — compose-f1r3sky-1
-├── PDS           :2583
-├── BSKY AppView  :2584
-├── Ozone         :2587
-├── DID PLC       :2582
-├── PostgreSQL    (compose-f1r3sky-postgres-1, internal-only)
-└── Redis         (compose-f1r3sky-redis-1, internal-only)
-
-F1R3Sky Frontend (port 8100) — compose-f1r3sky-frontend-1
-├── Web app served by bskyweb
-└── EXPO_PUBLIC_EMBERS_API_URL → http://localhost:8080 (baked at build time)
+```bash
+./scripts/stop-all.sh --node rust-standalone           # stop services
+./scripts/stop-all.sh --node rust-standalone --clean   # stop + remove volumes
+docker compose -p rust-standalone -f compose/f1r3node-rust-standalone.yml down       # node
+docker compose -p rust-standalone -f compose/f1r3node-rust-standalone.yml down -v    # node + data
 ```
 
-`start-all.sh --node rust-standalone` joins all services on the `rust-standalone_f1r3fly-standalone` network so embers can reach `rnode.rust-standalone` by hostname.
+`scripts/status.sh` shows the state of every container and probes the Embers endpoints.
 
-## What `start-all.sh` Does
+## How F1r3drive runs inside the embers container
 
-1. Verifies the Rust standalone node is running
-2. Starts f1r3sky-postgres + f1r3sky-redis (internal, no host ports)
-3. Starts f1r3sky backend (PDS:2583, BSKY:2584, Ozone:2587)
-4. Resolves f1r3sky container IP, starts embers with `--add-host localhost:<f1r3sky-ip>` so the AT Protocol DID `did:web:localhost` resolves to the f1r3sky PDS from inside the embers container
-5. Starts embers-frontend (port 8081) and f1r3sky-frontend (port 8100)
-6. Creates `user1.test` account via PDS API
-7. Waits for embers init deploys to finalize on the blockchain
+Embers hard-requires its Agent Teams continuation store to sit on a FUSE mount whose
+fsname contains `f1r3drive` (`verify_f1r3drive_mount` in the backend refuses ordinary
+disk), and cross-container FUSE mount sharing is not portable — Docker Desktop cannot
+propagate mounts between containers. The embers image therefore supervises both processes
+in one container (`docker/embers-entrypoint.sh` in the embers repo):
+
+1. wait for the node HTTP API (`NODE_HTTP_WAIT_URL`);
+2. start `f1r3drive-app.jar` (JRE 17), which mounts `/mnt/f1r3drive` with
+   `fsname=f1r3drive` and unlocks the service wallet's directory;
+3. wait until the mount and `/mnt/f1r3drive/<service-address>` exist;
+4. start `embers`; if either process exits, the other is stopped and the container exits
+   (compose restarts it) — the containerized equivalent of the native stack's `BindsTo`
+   coupling.
+
+The drive's AES cipher key is generated on first run at
+`/data/f1r3drive/f1r3drive-cipher.key`, persisted on the `embers-f1r3drive` volume.
+The key encrypts everything F1r3drive writes to the chain: **wipe that volume only
+together with the node volume**, otherwise previously written drive content becomes
+undecryptable.
+
+Propose semantics, preserved exactly as verified natively: the standalone validator runs
+`--autopropose` with heartbeat proposing enabled, and f1r3drive runs `--manual-propose`
+(it proposes after each of its own deploys and waits for finalization). Occasional
+"propose already in progress" warnings in the node log are benign.
+
+## Modes
+
+`start-all.sh` / `stop-all.sh` accept `--node <mode>`:
+
+| Mode | Node compose file | Embers env file | Status |
+|---|---|---|---|
+| `rust-standalone` | `compose/f1r3node-rust-standalone.yml` | `env/embers.rust-standalone.env` | **maintained and verified — use this** |
+| `shard` (default when `--node` is omitted!) | `compose/f1r3node-rust.yml` | `services/embers/embers.env` (untracked legacy path) | legacy shardctl flow, not maintained for the demo |
+| `scala-standalone` | `compose/f1r3node-standalone.yml` | `env/embers.scala-standalone.env` (not provided) | Scala node path, no maintained env file |
+
+Always pass `--node rust-standalone` explicitly; omitting `--node` silently targets shard
+mode.
+
+## Verifying the setup
+
+Run these after `start-all.sh` completes. Together they prove the FUSE co-location, the
+full deploy → propose → finalize → observer-read chain, a real agent-teams read, a real
+funded deploy, and both UIs.
+
+```bash
+# 1. F1r3drive mounted inside the embers container (fstype fuse.*, fsname f1r3drive)
+docker exec compose-embers-1 cat /proc/mounts | grep f1r3drive
+#    -> f1r3drive /mnt/f1r3drive fuse.f1r3drive rw,...
+
+# 2. The supervisor reached "mount ready" and embers did not reject the store
+docker logs compose-embers-1 2>&1 | grep '\[entrypoint\]'
+#    -> ... f1r3drive FUSE mount ready at /mnt/f1r3drive/1111jyBB...
+
+# 3. Readiness: 200 only after all five bootstrap init deploys finalized
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/api/service/ready
+#    -> 200   (first boot takes a few minutes: genesis + init deploys)
+
+# 4. Agent-teams read (the same probe start-all.sh polls)
+curl -s http://localhost:8080/api/ai-agents-teams/1111AtahZeefej4tvVR6ti9TJtv8yxLebT31SCEVDCKMNikBk5r3g
+#    -> 200 with a JSON body containing "agents_teams"
+
+# 5. Write path: a real funded deploy through the testnet module
+curl -s -X POST http://localhost:8080/api/testnet/wallet
+#    -> 200 with a wallet address and key
+
+# 6. Frontend serves with the injected API URL
+curl -s http://localhost:8081/config.js
+#    -> window.API_URL = "http://localhost:8080";
+
+# 7. F1R3Sky PDS is alive and serving its configuration
+curl -s http://localhost:2583/xrpc/com.atproto.server.describeServer
+#    -> {"did":"did:web:localhost","availableUserDomains":[".test",".example"],...}
+```
 
 ## Service URLs
 
@@ -208,7 +290,8 @@ F1R3Sky Frontend (port 8100) — compose-f1r3sky-frontend-1
 | Embers Swagger | http://localhost:8080/swagger-ui/index.html | — |
 | F1R3Sky PDS | http://localhost:2583 | — |
 
-Additional F1R3Sky accounts can be created via PDS API (frontend captcha doesn't work locally):
+Additional F1R3Sky accounts can be created via the PDS API (the frontend captcha does not
+work locally):
 
 ```bash
 curl -X POST http://localhost:2583/xrpc/com.atproto.server.createAccount \
@@ -216,118 +299,98 @@ curl -X POST http://localhost:2583/xrpc/com.atproto.server.createAccount \
   -d '{"handle": "user2.test", "email": "user2@test.com", "password": "password123"}'
 ```
 
-## Demo Flow
+## Demo flow
 
-1. **Embers frontend** (`http://localhost:8081`) → Sign in with bootstrap key → Create agent team → Build graph (input → text model → output) → Save → Deploy
+1. **Embers frontend** (`http://localhost:8081`) → Sign in with the bootstrap key →
+   Create agent team → Build graph (input → text model → output) → Save → Deploy
 2. **Embers frontend** → Publish agent team:
    - PDS URL: `http://f1r3sky:2583`
    - Handle: `myagent.test`
    - Email: any (must be unique per publish)
    - Password: any
-3. **F1R3Sky frontend** (`http://localhost:8100`) → Sign in as `user1.test` → Load wallet → Post tagging `@myagent.test <your prompt>`
-4. Agent auto-replies with GPT-4 text (~30-60s)
+3. **F1R3Sky frontend** (`http://localhost:8100`) → Sign in as `user1.test` → Load wallet →
+   Post tagging `@myagent.test <your prompt>`
+4. The agent auto-replies with GPT text (~30-60 s). Requires the OpenAI key on the node.
 
-**Note:** A wallet must be loaded in the F1R3Sky frontend for the @mention trigger to work. The wallet signs the runOnFiresky transaction.
+A wallet must be loaded in the F1R3Sky frontend for the @mention trigger to work — it signs
+the runOnFiresky transaction.
 
-## Verifying the setup
+## Port reference
 
-After `start-all.sh` completes, run the E2E demo test:
+| Port | Service |
+|---|---|
+| 40400-40405 | standalone node (protocol, gRPC ext/int, HTTP, discovery, admin) |
+| 8080 | Embers API (container port 3000) |
+| 8081 | Embers frontend (container port 80) |
+| 2581 | F1R3Sky (auxiliary) |
+| 2582 | F1R3Sky DID PLC |
+| 2583 | F1R3Sky PDS |
+| 2584 | F1R3Sky AppView |
+| 2587 | F1R3Sky Ozone |
+| 8100 | F1R3Sky frontend (optional) |
 
-```bash
-scripts/e2e-demo-test.sh --skip-start --no-teardown
+**Coexisting with another stack** (for example the native embers-local-stack on the same
+machine): give the compose projects different names and override only the published ports —
+container-to-container traffic stays on the compose network and needs no host ports. With
+Compose ≥ 2.24, an override file replaces port lists wholesale:
+
+```yaml
+# node.override.yml
+services:
+  standalone:
+    ports: !override
+      - "44401:40401"
+      - "44403:40403"
 ```
 
-Expected: ~60s runtime, `=== E2E Demo Test PASSED ===`. Exercises all 8 phases programmatically: create → save → deploy → run (GPT-4) → publish → verify profile → post → agent auto-reply.
-
-If Phase 5 result and Phase 8 reply are empty strings, the OpenAI key isn't loaded — recheck `.env.node` and restart the Rust node. See [`e2e-demo/README.md`](../e2e-demo/README.md) for details.
-
-## Scripts
-
-| Script | Purpose |
-|---|---|
-| `scripts/start-all.sh --node rust-standalone` | Start embers + f1r3sky services |
-| `scripts/stop-all.sh --node rust-standalone` | Stop services |
-| `scripts/stop-all.sh --node rust-standalone --clean` | Stop + remove volumes |
-| `scripts/status.sh` | Show status of all services |
-| `scripts/e2e-demo-test.sh --skip-start --no-teardown` | Run E2E demo test |
-
-## Port Reference
-
-| Service | Port | Purpose |
-|---|---|---|
-| Rust Node | 40400-40405 | Protocol, gRPC, HTTP, discovery, admin |
-| Embers API | 8080 | Blockchain API bridge |
-| Embers Frontend | 8081 | Embers React UI |
-| F1R3Sky PDS | 2583 | AT Protocol Personal Data Server |
-| F1R3Sky AppView | 2584 | AT Protocol feed/profile API |
-| F1R3Sky DID PLC | 2582 | DID directory |
-| F1R3Sky Ozone | 2587 | AT Protocol moderation |
-| F1R3Sky Frontend | 8100 | F1R3Sky web UI |
+```bash
+docker compose -p my-test -f compose/f1r3node-rust-standalone.yml -f node.override.yml ... up -d
+```
 
 ## Troubleshooting
 
-### Embers fails bootstrap with "failed to deserialize intermediate model"
+- **Embers exits: `failed to open the F1r3drive Agent Teams continuation store` /
+  "not inside the fsname=f1r3drive FUSE mount"** — the FUSE privileges are missing or the
+  mount never appeared. Check `docker logs compose-embers-1` for the `[entrypoint]` lines:
+  `/dev/fuse is missing` means the compose privileges (`devices`, `cap_add`,
+  `security_opt`) were not applied (verify with `docker compose ... config`);
+  `did not mount and unlock` with the java process alive means the drive could not reach
+  the node or unlock the wallet — check the node is healthy and genesis is fresh.
+- **Embers exits immediately with a configuration error** — the env file has drifted from
+  the backend's configuration schema (`packages/embers/src/configuration.rs`). All
+  `EMBERS__*` keys in `env/embers.rust-standalone.env` are required; the hex keys are
+  64 hex chars; the continuation-store encryption and capability keys must differ.
+- **`failed to deserialize intermediate model` or gRPC decode errors in embers** — the
+  node image was not built from `feature/cost-accounted-rho` (wire-format mismatch).
+  Rebuild the node image exactly as in "Build the images"; do not substitute
+  `f1r3flyindustries/f1r3fly-rust:latest` or the frozen `f1r3fly-rust-node` tags.
+- **Init deploys never finalize / `ready` stays non-200 / agent-teams reads return `Nil`**
+  — genesis is missing a funded wallet or a stale volume predates the current
+  `standalone-wallets.txt`. Tear down both projects with `-v`/`--clean` and start fresh;
+  confirm the node command includes `--autopropose` (`docker inspect rnode.rust-standalone`).
+- **Port already in use on `up`** — another stack holds the port. Use the coexistence
+  override pattern above, or stop the other stack.
+- **Node crash-loops at startup: `OpenAI API key is not configured ... when openai is
+  enabled`** — `OPENAI_ENABLED=true` reached the container (often a shell-exported
+  variable overriding `.env.node`; compose gives the OS environment precedence) without
+  `OPENAI_API_KEY`. Either export the key or force-disable for the session:
+  `OPENAI_ENABLED=false docker compose ... up -d --force-recreate`.
+- **Agent replies are empty** — the OpenAI key is not loaded on the node:
+  `docker exec rnode.rust-standalone env | grep -i openai` (the Rust node needs
+  `OPENAI_API_KEY`), fix `.env.node`, and recreate the node container.
+- **"Email already taken" when publishing** — a previous publish used the email; use a
+  fresh one or wipe with `--clean`.
+- **Docker build cache bloat after many rebuilds** — `docker builder prune -f`.
 
-The Rust node version is too new. Pin to `v0.4.5`:
+## Known issues
 
-```bash
-bash scripts/stop-all.sh --node rust-standalone --clean
-docker compose -p rust-standalone -f compose/f1r3node-rust-standalone.yml down -v
-docker pull f1r3flyindustries/f1r3fly-rust-node:v0.4.5
-F1R3FLY_RUST_IMAGE=f1r3flyindustries/f1r3fly-rust-node:v0.4.5 \
-STANDALONE_HOST=rnode.rust-standalone \
-docker compose -p rust-standalone -f compose/f1r3node-rust-standalone.yml \
-  --env-file .env.node up -d
-```
-
-### Phase 8 (auto-reply) doesn't fire on @mention from manual demo
-
-The f1r3sky frontend was built without `EXPO_PUBLIC_EMBERS_API_URL`. Rebuild it with the build arg set (see Build section #4).
-
-### "Email already taken" when publishing agent
-
-The PDS already has an account for that email from a previous publish. Either use a different email or wipe the f1r3sky postgres volume:
-
-```bash
-bash scripts/stop-all.sh --node rust-standalone --clean
-bash scripts/start-all.sh --node rust-standalone
-```
-
-### Agent runs but produces empty results
-
-OpenAI key not loaded. Check container env:
-
-```bash
-docker exec rnode.rust-standalone env | grep -i openai
-```
-
-If empty, edit `.env.node` and restart the Rust node with `--env-file .env.node`.
-
-### Embers container exits during bootstrap
-
-```bash
-docker logs compose-embers-1 | tail -50
-```
-
-Common causes:
-- Wrong Rust node version (see deserialization error above)
-- Rust node not yet ready when embers started — restart embers: `docker restart compose-embers-1`
-- Stale volume from prior run with different node version — wipe with `--clean`
-
-### Docker daemon wedging after heavy builds
-
-```bash
-docker builder prune -f
-```
-
-## Known Issues
-
-- **Embers**: See `services/embers/docs/embers-rust-node-updates.md`
-- **Embers Frontend**: See `services/embers-frontend/docs/known-issues.md`
-- **F1R3Sky Frontend**: See `services/f1r3sky/docs/known-issues.md`
+- `scripts/e2e-demo-test.sh` (the scripted 8-phase demo) currently cannot run from a fresh
+  clone: `e2e-demo/demo-test.ts` imports `e2e-demo/lib/`, which was never committed. The
+  verification checklist above covers the stack end-to-end in its place.
+- Per-service known-issue documents live in the service repos: embers
+  `docs/embers-rust-node-updates.md`, embers-frontend `docs/known-issues.md`, f1r3sky
+  `docs/known-issues.md`.
 
 ## Related PRs
 
-- Embers: https://github.com/F1R3FLY-io/embers/pull/168
-- Embers Frontend: https://github.com/F1R3FLY-io/embers-frontend/pull/196
-- System-integration: https://github.com/F1R3FLY-io/system-integration/pull/37
+- embers#168, embers-frontend#196, system-integration#37 (this branch).

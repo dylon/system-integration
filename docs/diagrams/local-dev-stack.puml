@@ -1,0 +1,81 @@
+@startuml local-dev-stack
+title Embers local development stack - docker topology\n(compose projects, containers, ports, and the co-located F1r3drive FUSE mount)
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName Helvetica
+skinparam rectangleBorderThickness 1
+skinparam packageBorderThickness 2
+skinparam ArrowThickness 1.2
+
+skinparam package {
+  BackgroundColor #FAFAFA
+  BorderColor #90A4AE
+  FontColor #37474F
+}
+
+actor "Developer /\nCustomer browser" as browser #E1BEE7
+
+package "compose project: rust-standalone" as nodeproj #E8F5E9 {
+  rectangle "container **rnode.rust-standalone**\nimage f1r3flyindustries/f1r3fly-rust-node:cost-accounted-local\ncommand: run -s --autopropose\nports 40400-40405 (host = container)\nconf: conf/standalone-dev.conf\ngenesis: standalone-{wallets,bonds}.txt (5 funded wallets)" as node #C8E6C9
+  database "volume\nstandalone-data" as nodevol #DCEDC8
+}
+
+package "compose project: compose (services-standalone.yml)" as svcproj #FFF8E1 {
+
+  rectangle "container **embers** (:8080 -> 3000)\nimage f1r3flyio/embers:local\ndevices /dev/fuse | cap SYS_ADMIN | apparmor:unconfined" as embersbox #FFE0B2 {
+    rectangle "embers-entrypoint.sh\n(supervisor: wait node -> drive -> mount -> embers;\nfirst exit stops the sibling)" as supervisor #FFF3E0
+    rectangle "f1r3drive-app.jar (JRE 17)\n--manual-propose\nno listen ports" as drive #FFECB3
+    rectangle "FUSE mount /mnt/f1r3drive\nfsname=f1r3drive\n<address>/embers-agent-teams/v1" as fusemount #FFE082
+    rectangle "embers (Rust, :3000)\ncontinuation store on the mount\n(verify_f1r3drive_mount)" as embers #FFCC80
+  }
+  database "volume embers-f1r3drive\n(AES cipher key, generated on first run)" as drivevol #FFF9C4
+
+  rectangle "container **f1r3sky**\nimage f1r3flyindustries/firesky-ts:local\nPLC :2582 | PDS :2583 | AppView :2584 | Ozone :2587" as f1r3sky #BBDEFB
+  rectangle "container **f1r3sky-postgres**\npostgres:16-alpine (internal)" as pg #ECEFF1
+  rectangle "container **f1r3sky-redis**\nredis:7-alpine (internal)" as redis #ECEFF1
+  rectangle "container **embers-frontend** (:8081 -> 80)\nimage f1r3flyio/embers-frontend:local\nnginx + config.js API_URL injection" as frontend #E1BEE7
+  rectangle "container **f1r3sky-frontend** (:8100, optional)\nimage f1r3flyio/firesky-frontend:local" as skyweb #D1C4E9
+}
+
+cloud "shared bridge network\nrust-standalone_f1r3fly-standalone" as net #F5F5F5
+
+browser -down-> frontend : "http://localhost:8081\n(Embers UI)"
+browser -down-> embersbox : "http://localhost:8080/api\n+ /swagger-ui"
+browser -down-> skyweb : "http://localhost:8100\n(F1r3sky UI)"
+frontend .right.> embersbox : "browser calls\nAPI_URL = http://localhost:8080"
+
+supervisor -down-> drive : "starts, then waits for"
+drive -down-> fusemount : "mounts (jnr-fuse)"
+fusemount -down-> embers : "continuation store\nreads/writes"
+supervisor -down-> embers : "starts after the\nmount is ready"
+drive .left.> drivevol : "key file"
+
+embers -left-> node : "deploy/propose gRPC :40401\nobserver HTTP/WS :40403"
+drive -left-> node : "deploy via validator gRPC :40401\nread via observer gRPC :40401"
+embers -right-> f1r3sky : "PDS XRPC :2583\n(extra_hosts: localhost -> f1r3sky)"
+f1r3sky -down-> pg : "postgres"
+f1r3sky -down-> redis : "redis"
+node .down.> nodevol : "chain data"
+
+nodeproj -[hidden]right- svcproj
+net -[hidden]up- nodeproj
+
+note bottom of net
+  All containers join the same external bridge network, so services address
+  the node by its container DNS name (rnode.rust-standalone). The FUSE mount
+  never crosses a container boundary - the co-location is what makes the
+  stack behave identically on Linux, macOS, and Windows (Docker Desktop runs
+  every container on a Linux kernel).
+end note
+
+legend right
+  |= Color |= Component family |
+  |<#C8E6C9> | f1r3node-rust (chain) |
+  |<#FFCC80> | Embers backend |
+  |<#FFE082> | F1r3drive (FUSE) |
+  |<#BBDEFB> | F1r3sky (AT-proto) |
+  |<#E1BEE7> | Web frontends |
+  |<#ECEFF1> | Stock infrastructure |
+endlegend
+@enduml
